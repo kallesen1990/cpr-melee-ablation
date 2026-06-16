@@ -10,5 +10,7 @@
   "systems": ["cyberpunk-red-core"],
   "esmodules": ["scripts/ablation.js"],
   "authors": [{ "name": "GM Tool" }],
-  "flags": {}
+  "flags": {},
+  "download": "https://github.com/kallesen1990/cpr-melee-ablation/archive/refs/heads/main.zip",
+  "url": "https://github.com/kallesen1990/cpr-melee-ablation"
 }

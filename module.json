@@ -1,0 +1,14 @@
+{
+  "id": "cpr-melee-ablation",
+  "title": "CPR Melee Ablation",
+  "description": "Allows melee weapons in Cyberpunk RED to ablate more than 1 SP per hit. Set the 'meleeAblation' flag on any weapon item to control how much SP it ablates.",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "11",
+    "verified": "12.343"
+  },
+  "systems": ["cyberpunk-red-core"],
+  "esmodules": ["scripts/ablation.js"],
+  "authors": [{ "name": "GM Tool" }],
+  "flags": {}
+}

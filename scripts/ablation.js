@@ -1,6 +1,6 @@
 /**
  * CPR Melee Ablation
- * Intercepts CPR damage roll rendering and injects a custom ablation value
+ * Hooks into CPRChat.RenderDamageApplicationCard to inject custom ablation
  * from a flag set on the weapon item.
  */
 
@@ -10,68 +10,83 @@ Hooks.once("ready", async () => {
   let CPRChat;
   try {
     const mod = await import(`/systems/${game.system.id}/modules/chat/cpr-chat.js`);
-    CPRChat = mod.default;
+    CPRChat = mod.default ?? mod;
   } catch (err) {
     console.error(`[${MODULE_ID}] Could not import CPRChat:`, err);
     return;
   }
 
-  if (!CPRChat || typeof CPRChat.RenderRollCard !== "function") {
-    console.warn(`[${MODULE_ID}] CPRChat.RenderRollCard not found.`);
-    return;
+  if (typeof CPRChat.RenderRollCard === "function") {
+    const _origRRC = CPRChat.RenderRollCard.bind(CPRChat);
+    CPRChat.RenderRollCard = async function (cprRoll) {
+      injectAblation(cprRoll);
+      return _origRRC(cprRoll);
+    };
+    console.log(`[${MODULE_ID}] RenderRollCard patched.`);
   }
 
-  const _original = CPRChat.RenderRollCard.bind(CPRChat);
+  if (typeof CPRChat.RenderDamageApplicationCard === "function") {
+    const _origRDAC = CPRChat.RenderDamageApplicationCard.bind(CPRChat);
+    CPRChat.RenderDamageApplicationCard = async function (...args) {
+      const roll = args[0];
+      console.log(`[${MODULE_ID}] RenderDamageApplicationCard called, args[0] type:`, roll?.constructor?.name);
+      injectAblation(roll);
+      return _origRDAC(...args);
+    };
+    console.log(`[${MODULE_ID}] RenderDamageApplicationCard patched.`);
+  } else {
+    console.warn(`[${MODULE_ID}] RenderDamageApplicationCard not found.`);
+  }
 
-  CPRChat.RenderRollCard = async function (cprRoll) {
-    if (cprRoll) {
-      let ablation = null;
+  console.log(`[${MODULE_ID}] Hooks installed.`);
+});
 
-      // Method 1: read from the live actor item via entityData
-      try {
-        const actorId = cprRoll.entityData?.actor;
-        const itemId  = cprRoll.entityData?.item;
-        if (actorId && itemId) {
-          const actor = game.actors?.get(actorId)
-            ?? canvas.tokens?.placeables.find(t => (t.actor?.id ?? t.actor?._id) === actorId)?.actor;
-          if (actor) {
-            const item = actor.items?.get(itemId)
-              ?? Array.from(actor.items ?? []).find(i => (i.id ?? i._id) === itemId);
-            if (item) {
-              const val = item.getFlag("world", "meleeAblation");
-              if (val !== undefined && val !== null) ablation = val;
-              console.log(`[${MODULE_ID}] Live item "${item.name}" flag:`, val);
-            }
+function injectAblation(cprRoll) {
+  if (!cprRoll) return;
+
+  let ablation = null;
+
+  try {
+    const actorId = cprRoll.entityData?.actor;
+    const itemId  = cprRoll.entityData?.item;
+    if (actorId && itemId) {
+      const actor = game.actors?.get(actorId)
+        ?? canvas.tokens?.placeables.find(t =>
+            (t.actor?.id ?? t.actor?._id) === actorId)?.actor;
+      if (actor) {
+        const item = actor.items?.get(itemId)
+          ?? Array.from(actor.items ?? []).find(i => (i.id ?? i._id) === itemId);
+        if (item) {
+          const val = item.getFlag("world", "meleeAblation");
+          if (val !== undefined && val !== null) {
+            ablation = val;
+            console.log(`[${MODULE_ID}] Method 1: "${item.name}" ablation flag =`, val);
           }
         }
-      } catch (e) {
-        console.warn(`[${MODULE_ID}] Method 1 failed:`, e);
-      }
-
-      // Method 2: read from embedded __autoFumbleRecoveryItem flags
-      if (ablation === null) {
-        try {
-          const itemData = cprRoll.__autoFumbleRecoveryItem;
-          const val = itemData?.flags?.world?.meleeAblation ?? null;
-          if (val !== null) ablation = val;
-          console.log(`[${MODULE_ID}] Embedded item flags:`, itemData?.flags);
-        } catch (e) {
-          console.warn(`[${MODULE_ID}] Method 2 failed:`, e);
-        }
-      }
-
-      if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
-        console.log(`[${MODULE_ID}] Injecting ablation:`, ablation);
-        cprRoll.ablation      = ablation;
-        cprRoll.ablationValue = ablation;
       }
     }
+  } catch (e) {
+    console.warn(`[${MODULE_ID}] Method 1 error:`, e);
+  }
 
-    return _original(cprRoll);
-  };
+  if (ablation === null) {
+    try {
+      const val = cprRoll?.__autoFumbleRecoveryItem?.flags?.world?.meleeAblation ?? null;
+      if (val !== null) {
+        ablation = val;
+        console.log(`[${MODULE_ID}] Method 2: embedded flags ablation =`, val);
+      }
+    } catch (e) {
+      console.warn(`[${MODULE_ID}] Method 2 error:`, e);
+    }
+  }
 
-  console.log(`[${MODULE_ID}] Hook installed.`);
-});
+  if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
+    console.log(`[${MODULE_ID}] Injecting ablation =`, ablation);
+    cprRoll.ablation      = ablation;
+    cprRoll.ablationValue = ablation;
+  }
+}
 
 Hooks.once("ready", () => {
   const module = game.modules.get(MODULE_ID);
@@ -94,7 +109,7 @@ Hooks.once("ready", () => {
         .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
       if (!weapons.length) {
-        ui.notifications.warn(`[${MODULE_ID}] ${target.name} has no weapons.`);
+        ui.notifications.warn(`[CPR Melee Ablation] ${target.name} has no weapons.`);
         return;
       }
 
@@ -169,11 +184,11 @@ Hooks.once("ready", () => {
     async setAblation(actor, weaponName, amount) {
       const weapon = actor.items.getName(weaponName);
       if (!weapon) {
-        ui.notifications.error(`[${MODULE_ID}] Weapon "${weaponName}" not found on ${actor.name}.`);
+        ui.notifications.error(`[CPR Melee Ablation] "${weaponName}" not found on ${actor.name}.`);
         return;
       }
       await weapon.setFlag("world", "meleeAblation", amount);
-      ui.notifications.info(`[${MODULE_ID}] ${weaponName} will now ablate ${amount} SP.`);
+      ui.notifications.info(`[CPR Melee Ablation] ${weaponName} will now ablate ${amount} SP.`);
     },
   };
 

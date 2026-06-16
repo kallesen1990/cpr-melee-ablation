@@ -1,22 +1,7 @@
 /**
  * CPR Melee Ablation
- *
  * Intercepts CPR damage roll rendering and injects a custom ablation value
  * from a flag set on the weapon item.
- *
- * Usage:
- *   Set the flag on any weapon item (world item or per-actor instance):
- *     item.setFlag("world", "meleeAblation", 2)
- *
- *   Or set it via the console with a token selected:
- *     canvas.tokens.controlled[0].actor.items
- *       .getName("My Weapon").setFlag("world", "meleeAblation", 2)
- *
- *   Clear it:
- *     item.unsetFlag("world", "meleeAblation")
- *
- * The flag value must be an integer >= 2. Weapons without the flag are
- * unaffected — they ablate the normal CPR default of 1 SP.
  */
 
 const MODULE_ID = "cpr-melee-ablation";
@@ -24,9 +9,7 @@ const MODULE_ID = "cpr-melee-ablation";
 Hooks.once("ready", async () => {
   let CPRChat;
   try {
-    const mod = await import(
-      `/systems/${game.system.id}/modules/chat/cpr-chat.js`
-    );
+    const mod = await import(`/systems/${game.system.id}/modules/chat/cpr-chat.js`);
     CPRChat = mod.default;
   } catch (err) {
     console.error(`[${MODULE_ID}] Could not import CPRChat:`, err);
@@ -34,25 +17,60 @@ Hooks.once("ready", async () => {
   }
 
   if (!CPRChat || typeof CPRChat.RenderRollCard !== "function") {
-    console.warn(`[${MODULE_ID}] CPRChat.RenderRollCard not found — ablation hook not installed.`);
+    console.warn(`[${MODULE_ID}] CPRChat.RenderRollCard not found.`);
     return;
   }
 
   const _original = CPRChat.RenderRollCard.bind(CPRChat);
 
   CPRChat.RenderRollCard = async function (cprRoll) {
-    if (cprRoll && cprRoll.__autoFumbleRecoveryItem) {
-      const itemData = cprRoll.__autoFumbleRecoveryItem;
-      const ablation = itemData?.flags?.world?.meleeAblation ?? null;
+    if (cprRoll) {
+      let ablation = null;
+
+      // Method 1: read from the live actor item via entityData
+      try {
+        const actorId = cprRoll.entityData?.actor;
+        const itemId  = cprRoll.entityData?.item;
+        if (actorId && itemId) {
+          const actor = game.actors?.get(actorId)
+            ?? canvas.tokens?.placeables.find(t => (t.actor?.id ?? t.actor?._id) === actorId)?.actor;
+          if (actor) {
+            const item = actor.items?.get(itemId)
+              ?? Array.from(actor.items ?? []).find(i => (i.id ?? i._id) === itemId);
+            if (item) {
+              const val = item.getFlag("world", "meleeAblation");
+              if (val !== undefined && val !== null) ablation = val;
+              console.log(`[${MODULE_ID}] Live item "${item.name}" flag:`, val);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[${MODULE_ID}] Method 1 failed:`, e);
+      }
+
+      // Method 2: read from embedded __autoFumbleRecoveryItem flags
+      if (ablation === null) {
+        try {
+          const itemData = cprRoll.__autoFumbleRecoveryItem;
+          const val = itemData?.flags?.world?.meleeAblation ?? null;
+          if (val !== null) ablation = val;
+          console.log(`[${MODULE_ID}] Embedded item flags:`, itemData?.flags);
+        } catch (e) {
+          console.warn(`[${MODULE_ID}] Method 2 failed:`, e);
+        }
+      }
+
       if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
+        console.log(`[${MODULE_ID}] Injecting ablation:`, ablation);
         cprRoll.ablation      = ablation;
         cprRoll.ablationValue = ablation;
       }
     }
+
     return _original(cprRoll);
   };
 
-  console.log(`[${MODULE_ID}] Melee ablation hook installed.`);
+  console.log(`[${MODULE_ID}] Hook installed.`);
 });
 
 Hooks.once("ready", () => {
@@ -63,7 +81,7 @@ Hooks.once("ready", () => {
     openManager(actor = null) {
       const target = actor ?? canvas.tokens?.controlled[0]?.actor ?? null;
       if (!target) {
-        ui.notifications.warn("[CPR Melee Ablation] Select a token first, or pass an actor.");
+        ui.notifications.warn("[CPR Melee Ablation] Select a token first.");
         return;
       }
 
@@ -76,7 +94,7 @@ Hooks.once("ready", () => {
         .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
       if (!weapons.length) {
-        ui.notifications.warn(`[CPR Melee Ablation] ${target.name} has no weapons.`);
+        ui.notifications.warn(`[${MODULE_ID}] ${target.name} has no weapons.`);
         return;
       }
 
@@ -113,9 +131,7 @@ Hooks.once("ready", () => {
             </thead>
             <tbody>${rows}</tbody>
           </table>
-          <p style="font-size:11px;opacity:0.7;margin-bottom:0;">
-            Clear a field to remove custom ablation.
-          </p>`,
+          <p style="font-size:11px;opacity:0.7;margin-bottom:0;">Clear a field to remove custom ablation.</p>`,
         buttons: {
           save: {
             label: "Save",
@@ -153,11 +169,11 @@ Hooks.once("ready", () => {
     async setAblation(actor, weaponName, amount) {
       const weapon = actor.items.getName(weaponName);
       if (!weapon) {
-        ui.notifications.error(`[CPR Melee Ablation] Weapon "${weaponName}" not found on ${actor.name}.`);
+        ui.notifications.error(`[${MODULE_ID}] Weapon "${weaponName}" not found on ${actor.name}.`);
         return;
       }
       await weapon.setFlag("world", "meleeAblation", amount);
-      ui.notifications.info(`[CPR Melee Ablation] ${weaponName} will now ablate ${amount} SP.`);
+      ui.notifications.info(`[${MODULE_ID}] ${weaponName} will now ablate ${amount} SP.`);
     },
   };
 

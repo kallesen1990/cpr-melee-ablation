@@ -1,15 +1,24 @@
 {
   "id": "cpr-melee-ablation",
   "title": "CPR Melee Ablation",
-  "description": "Allows melee weapons in Cyberpunk RED to ablate more than 1 SP per hit. Set the 'meleeAblation' flag on any weapon item to control how much SP it ablates.",
-  "version": "1.0.0",
+  "description": "Allows melee weapons in Cyberpunk RED to ablate more than 1 SP per hit. Set the 'meleeAblation' flag on any weapon item to control how much SP it ablates. Also hides the whisper recipient line on private/blind/GM chat messages.",
+  "version": "1.1.0",
   "compatibility": {
     "minimum": "11",
     "verified": "12.343"
   },
-  "systems": ["cyberpunk-red-core"],
-  "esmodules": ["scripts/ablation.js"],
-  "authors": [{ "name": "GM Tool" }],
+  "systems": [
+    "cyberpunk-red-core"
+  ],
+  "esmodules": [
+    "scripts/ablation.js",
+    "scripts/hide-whisper-to.js"
+  ],
+  "authors": [
+    {
+      "name": "GM Tool"
+    }
+  ],
   "flags": {},
   "download": "https://github.com/kallesen1990/cpr-melee-ablation/archive/refs/heads/main.zip",
   "url": "https://github.com/kallesen1990/cpr-melee-ablation"

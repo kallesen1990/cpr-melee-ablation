@@ -1,33 +1,22 @@
 /**
  * CPR Melee Ablation
- * Tracks the last rolled weapon and injects its meleeAblation flag
- * into the damage application card.
+ * Intercepts both damage card templates to inject custom ablation.
  */
 
 const MODULE_ID = "cpr-melee-ablation";
 
-// Store the last weapon item that triggered a damage roll
+// Track the last weapon item used in a damage roll
 let _lastRolledItem = null;
 let _lastRolledTimer = null;
 
 Hooks.once("ready", async () => {
 
-  // ── Intercept item.createRoll to capture which weapon is being rolled ──────
-  const { CPRDamageRoll } = await import(
-    `/systems/${game.system.id}/modules/rolls/cpr-rolls.js`
-  ).catch(() => ({}));
-
-  // Patch CPRItem.createRoll on all existing actor items
-  // We do this via a hook that fires when actors are prepared
+  // ── Patch item.createRoll to track which weapon fired ─────────────────────
   const patchActorItems = (actor) => {
     if (!actor?.items) return;
     for (const item of actor.items) {
       if (item.type !== "weapon") continue;
-      const proto = Object.getPrototypeOf(item);
-      if (proto.__ablationPatched) continue;
-
-      // Find createRoll on prototype chain
-      let p = proto;
+      let p = Object.getPrototypeOf(item);
       while (p) {
         const desc = Object.getOwnPropertyDescriptor(p, "createRoll");
         if (desc?.value && !p.__ablationPatched) {
@@ -37,10 +26,9 @@ Hooks.once("ready", async () => {
             const roll = _orig.call(this, rollType, ...args);
             if (rollType === "damage") {
               _lastRolledItem = this;
-              // Clear after 30 seconds in case the roll is cancelled
               if (_lastRolledTimer) clearTimeout(_lastRolledTimer);
               _lastRolledTimer = setTimeout(() => { _lastRolledItem = null; }, 30000);
-              console.log(`[${MODULE_ID}] Tracked damage roll: "${this.name}", flag:`, this.getFlag("world", "meleeAblation"));
+              console.log(`[${MODULE_ID}] Tracked: "${this.name}", flag:`, this.getFlag("world", "meleeAblation"));
             }
             return roll;
           };
@@ -51,32 +39,40 @@ Hooks.once("ready", async () => {
     }
   };
 
-  // Patch items on all current actors
   for (const actor of game.actors ?? []) patchActorItems(actor);
-  // Patch items on tokens too (unlinked actors)
   for (const token of canvas.tokens?.placeables ?? []) {
     if (token.actor) patchActorItems(token.actor);
   }
-
-  // Patch newly created/updated actors
   Hooks.on("createActor", patchActorItems);
   Hooks.on("updateActor", (actor) => patchActorItems(actor));
 
-  // ── Intercept renderTemplate for the damage application card ──────────────
+  // ── Intercept renderTemplate ───────────────────────────────────────────────
   const _origRenderTemplate = renderTemplate;
+
   window.renderTemplate = async function(path, data) {
-    if (path && path.includes("cpr-damage-application-card")) {
+    // Both the roll card AND the application card need patching:
+    // - cpr-damage-rollcard.hbs: contains data-ablation on the "apply" button
+    // - cpr-damage-application-card.hbs: contains the final displayed ablation value
+    const isDamageCard = path && (
+      path.includes("cpr-damage-rollcard") ||
+      path.includes("cpr-damage-application-card")
+    );
+
+    if (isDamageCard) {
       try {
         let ablation = null;
 
-        // Method 1: use the tracked last rolled item
+        // Method 1: tracked last rolled item
         if (_lastRolledItem) {
           const val = _lastRolledItem.getFlag("world", "meleeAblation");
           if (val !== undefined && val !== null) {
             ablation = val;
-            console.log(`[${MODULE_ID}] Method 1 (tracked): "${_lastRolledItem.name}" ablation =`, val);
+            console.log(`[${MODULE_ID}] Method 1: "${_lastRolledItem.name}" ablation =`, val);
           }
-          _lastRolledItem = null; // consume it
+          // Only consume on the rollcard — keep it alive for the application card
+          if (path.includes("cpr-damage-application-card")) {
+            _lastRolledItem = null;
+          }
         }
 
         // Method 2: single flagged weapon on actor
@@ -86,18 +82,19 @@ Hooks.once("ready", async () => {
           );
           if (flagged.length === 1) {
             ablation = flagged[0].getFlag("world", "meleeAblation");
-            console.log(`[${MODULE_ID}] Method 2 (single): "${flagged[0].name}" ablation =`, ablation);
+            console.log(`[${MODULE_ID}] Method 2: "${flagged[0].name}" ablation =`, ablation);
           }
         }
 
         if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
-          console.log(`[${MODULE_ID}] Injecting ablation =`, ablation);
+          console.log(`[${MODULE_ID}] Injecting ablation =`, ablation, "into", path.split("/").pop());
           data.ablation = ablation;
         }
       } catch (e) {
         console.warn(`[${MODULE_ID}] renderTemplate error:`, e);
       }
     }
+
     return _origRenderTemplate(path, data);
   };
 

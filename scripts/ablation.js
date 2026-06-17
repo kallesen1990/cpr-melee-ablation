@@ -1,68 +1,107 @@
 /**
  * CPR Melee Ablation
- * Hooks into renderTemplate for cpr-damage-application-card.hbs to inject
- * custom ablation from a flag set on the weapon item.
+ * Tracks the last rolled weapon and injects its meleeAblation flag
+ * into the damage application card.
  */
 
 const MODULE_ID = "cpr-melee-ablation";
 
-Hooks.once("ready", () => {
-  // Patch renderTemplate — confirmed to fire with data.ablation on the damage card
-  const _origRenderTemplate = renderTemplate;
+// Store the last weapon item that triggered a damage roll
+let _lastRolledItem = null;
+let _lastRolledTimer = null;
 
-  window.renderTemplate = async function(path, data) {
-    // Only intercept the damage application card
-    if (path && path.includes("cpr-damage-application-card")) {
-      try {
-        // data.actor is the live Actor object — find flagged weapons
-        const actor = data?.actor;
-        if (actor?.items) {
-          // The last-used weapon is tracked by CPR on the actor
-          // Try to find which weapon was just used via currentWeapon or flagged weapons
-          let ablation = null;
+Hooks.once("ready", async () => {
 
-          // Check currentWeapon reference first
-          const currentWeaponId = actor.system?.externalData?.currentWeapon?.id;
-          if (currentWeaponId) {
-            const weapon = actor.items.get(currentWeaponId);
-            const val = weapon?.getFlag("world", "meleeAblation");
-            if (val) {
-              ablation = val;
-              console.log(`[${MODULE_ID}] currentWeapon "${weapon.name}" flag =`, val);
+  // ── Intercept item.createRoll to capture which weapon is being rolled ──────
+  const { CPRDamageRoll } = await import(
+    `/systems/${game.system.id}/modules/rolls/cpr-rolls.js`
+  ).catch(() => ({}));
+
+  // Patch CPRItem.createRoll on all existing actor items
+  // We do this via a hook that fires when actors are prepared
+  const patchActorItems = (actor) => {
+    if (!actor?.items) return;
+    for (const item of actor.items) {
+      if (item.type !== "weapon") continue;
+      const proto = Object.getPrototypeOf(item);
+      if (proto.__ablationPatched) continue;
+
+      // Find createRoll on prototype chain
+      let p = proto;
+      while (p) {
+        const desc = Object.getOwnPropertyDescriptor(p, "createRoll");
+        if (desc?.value && !p.__ablationPatched) {
+          p.__ablationPatched = true;
+          const _orig = desc.value;
+          p.createRoll = function(rollType, ...args) {
+            const roll = _orig.call(this, rollType, ...args);
+            if (rollType === "damage") {
+              _lastRolledItem = this;
+              // Clear after 30 seconds in case the roll is cancelled
+              if (_lastRolledTimer) clearTimeout(_lastRolledTimer);
+              _lastRolledTimer = setTimeout(() => { _lastRolledItem = null; }, 30000);
+              console.log(`[${MODULE_ID}] Tracked damage roll: "${this.name}", flag:`, this.getFlag("world", "meleeAblation"));
             }
-          }
-
-          // If no currentWeapon match, check all flagged weapons
-          // and use the one that matches the damage type/weapon type in data
-          if (ablation === null) {
-            const flaggedWeapons = Array.from(actor.items).filter(i =>
-              i.type === "weapon" && i.getFlag("world", "meleeAblation")
-            );
-            if (flaggedWeapons.length === 1) {
-              // Only one flagged weapon — use it
-              ablation = flaggedWeapons[0].getFlag("world", "meleeAblation");
-              console.log(`[${MODULE_ID}] Single flagged weapon "${flaggedWeapons[0].name}" ablation =`, ablation);
-            } else if (flaggedWeapons.length > 1) {
-              // Multiple flagged weapons — match by weaponType in armorData or location
-              console.log(`[${MODULE_ID}] Multiple flagged weapons — need smarter matching`);
-            }
-          }
-
-          if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
-            console.log(`[${MODULE_ID}] Injecting ablation =`, ablation, "into damage card");
-            data.ablation = ablation;
-            data.shieldAblation = data.shieldAblation ?? 0;
-          }
+            return roll;
+          };
+          break;
         }
-      } catch (e) {
-        console.warn(`[${MODULE_ID}] renderTemplate hook error:`, e);
+        p = Object.getPrototypeOf(p);
       }
     }
+  };
 
+  // Patch items on all current actors
+  for (const actor of game.actors ?? []) patchActorItems(actor);
+  // Patch items on tokens too (unlinked actors)
+  for (const token of canvas.tokens?.placeables ?? []) {
+    if (token.actor) patchActorItems(token.actor);
+  }
+
+  // Patch newly created/updated actors
+  Hooks.on("createActor", patchActorItems);
+  Hooks.on("updateActor", (actor) => patchActorItems(actor));
+
+  // ── Intercept renderTemplate for the damage application card ──────────────
+  const _origRenderTemplate = renderTemplate;
+  window.renderTemplate = async function(path, data) {
+    if (path && path.includes("cpr-damage-application-card")) {
+      try {
+        let ablation = null;
+
+        // Method 1: use the tracked last rolled item
+        if (_lastRolledItem) {
+          const val = _lastRolledItem.getFlag("world", "meleeAblation");
+          if (val !== undefined && val !== null) {
+            ablation = val;
+            console.log(`[${MODULE_ID}] Method 1 (tracked): "${_lastRolledItem.name}" ablation =`, val);
+          }
+          _lastRolledItem = null; // consume it
+        }
+
+        // Method 2: single flagged weapon on actor
+        if (ablation === null && data?.actor?.items) {
+          const flagged = Array.from(data.actor.items).filter(i =>
+            i.type === "weapon" && i.getFlag("world", "meleeAblation")
+          );
+          if (flagged.length === 1) {
+            ablation = flagged[0].getFlag("world", "meleeAblation");
+            console.log(`[${MODULE_ID}] Method 2 (single): "${flagged[0].name}" ablation =`, ablation);
+          }
+        }
+
+        if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
+          console.log(`[${MODULE_ID}] Injecting ablation =`, ablation);
+          data.ablation = ablation;
+        }
+      } catch (e) {
+        console.warn(`[${MODULE_ID}] renderTemplate error:`, e);
+      }
+    }
     return _origRenderTemplate(path, data);
   };
 
-  console.log(`[${MODULE_ID}] renderTemplate hook installed.`);
+  console.log(`[${MODULE_ID}] Hooks installed.`);
 });
 
 // ── API ───────────────────────────────────────────────────────────────────────

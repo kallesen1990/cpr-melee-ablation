@@ -1,6 +1,8 @@
 /**
  * CPR Melee Ablation
- * Intercepts both damage card templates to inject custom ablation.
+ * Intercepts the "apply damage" chat button click to override ablation.
+ * Works by hooking the chat log click handler AFTER CPR renders,
+ * and patching the data-ablation attribute on the bolt button in real time.
  */
 
 const MODULE_ID = "cpr-melee-ablation";
@@ -11,7 +13,7 @@ let _lastRolledTimer = null;
 
 Hooks.once("ready", async () => {
 
-  // ── Patch item.createRoll to track which weapon fired ─────────────────────
+  // ── Patch item.createRoll to track which weapon is being rolled ────────────
   const patchActorItems = (actor) => {
     if (!actor?.items) return;
     for (const item of actor.items) {
@@ -27,7 +29,7 @@ Hooks.once("ready", async () => {
             if (rollType === "damage") {
               _lastRolledItem = this;
               if (_lastRolledTimer) clearTimeout(_lastRolledTimer);
-              _lastRolledTimer = setTimeout(() => { _lastRolledItem = null; }, 30000);
+              _lastRolledTimer = setTimeout(() => { _lastRolledItem = null; }, 60000);
               console.log(`[${MODULE_ID}] Tracked: "${this.name}", flag:`, this.getFlag("world", "meleeAblation"));
             }
             return roll;
@@ -46,55 +48,86 @@ Hooks.once("ready", async () => {
   Hooks.on("createActor", patchActorItems);
   Hooks.on("updateActor", (actor) => patchActorItems(actor));
 
-  // ── Intercept renderTemplate ───────────────────────────────────────────────
+  // ── Patch the bolt button's data-ablation AFTER the chat card renders ──────
+  // CPR renders the damage roll card, then the user clicks the bolt.
+  // We intercept at renderChatMessage to overwrite data-ablation on the button.
+  Hooks.on("renderChatMessage", (message, html, data) => {
+    // Find any bolt "apply damage" button in the chat card
+    const btn = html.find("[data-action='applyDamage'], [data-ablation]");
+    if (!btn.length) return;
+
+    let ablation = null;
+
+    // Method 1: tracked weapon
+    if (_lastRolledItem) {
+      const val = _lastRolledItem.getFlag("world", "meleeAblation");
+      if (val !== undefined && val !== null) {
+        ablation = val;
+        console.log(`[${MODULE_ID}] renderChatMessage: setting data-ablation=${val} from "${_lastRolledItem.name}"`);
+      }
+      // Keep _lastRolledItem alive — it may be needed if re-rendered
+    }
+
+    // Method 2: look up the weapon from the message's actor/item data
+    if (ablation === null) {
+      try {
+        const actorId = message.flags?.["cyberpunk-red-core"]?.actorId
+          ?? message.speaker?.actor;
+        const itemId  = message.flags?.["cyberpunk-red-core"]?.itemId;
+        if (actorId && itemId) {
+          const actor = game.actors?.get(actorId)
+            ?? canvas.tokens?.placeables.find(t => t.actor?.id === actorId)?.actor;
+          const item = actor?.items?.get(itemId);
+          if (item) {
+            const val = item.getFlag("world", "meleeAblation");
+            if (val !== undefined && val !== null) {
+              ablation = val;
+              console.log(`[${MODULE_ID}] renderChatMessage (flags): "${item.name}" ablation=${val}`);
+            }
+          }
+        }
+      } catch(e) { /* ignore */ }
+    }
+
+    if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
+      btn.each((_, el) => {
+        if (el.dataset.ablation !== undefined) {
+          el.dataset.ablation = String(ablation);
+        }
+      });
+      console.log(`[${MODULE_ID}] Patched data-ablation → ${ablation}`);
+    }
+  });
+
+  // ── Also patch renderTemplate for the application card display ─────────────
   const _origRenderTemplate = renderTemplate;
-
   window.renderTemplate = async function(path, data) {
-    // Both the roll card AND the application card need patching:
-    // - cpr-damage-rollcard.hbs: contains data-ablation on the "apply" button
-    // - cpr-damage-application-card.hbs: contains the final displayed ablation value
-    const isDamageCard = path && (
-      path.includes("cpr-damage-rollcard") ||
-      path.includes("cpr-damage-application-card")
-    );
-
-    if (isDamageCard) {
+    if (path?.includes("cpr-damage-application-card")) {
       try {
         let ablation = null;
-
-        // Method 1: tracked last rolled item
         if (_lastRolledItem) {
           const val = _lastRolledItem.getFlag("world", "meleeAblation");
           if (val !== undefined && val !== null) {
             ablation = val;
-            console.log(`[${MODULE_ID}] Method 1: "${_lastRolledItem.name}" ablation =`, val);
           }
-          // Only consume on the rollcard — keep it alive for the application card
-          if (path.includes("cpr-damage-application-card")) {
-            _lastRolledItem = null;
-          }
+          _lastRolledItem = null; // consume here — application card is last
         }
-
-        // Method 2: single flagged weapon on actor
         if (ablation === null && data?.actor?.items) {
           const flagged = Array.from(data.actor.items).filter(i =>
             i.type === "weapon" && i.getFlag("world", "meleeAblation")
           );
           if (flagged.length === 1) {
             ablation = flagged[0].getFlag("world", "meleeAblation");
-            console.log(`[${MODULE_ID}] Method 2: "${flagged[0].name}" ablation =`, ablation);
           }
         }
-
         if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
-          console.log(`[${MODULE_ID}] Injecting ablation =`, ablation, "into", path.split("/").pop());
+          console.log(`[${MODULE_ID}] App card injecting ablation =`, ablation);
           data.ablation = ablation;
         }
-      } catch (e) {
+      } catch(e) {
         console.warn(`[${MODULE_ID}] renderTemplate error:`, e);
       }
     }
-
     return _origRenderTemplate(path, data);
   };
 

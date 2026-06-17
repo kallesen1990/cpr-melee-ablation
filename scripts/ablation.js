@@ -1,110 +1,69 @@
 /**
  * CPR Melee Ablation
- * Patches CPRChat.RenderDamageApplicationCard to inject custom ablation
- * from a flag set on the weapon item.
+ * Hooks into renderTemplate for cpr-damage-application-card.hbs to inject
+ * custom ablation from a flag set on the weapon item.
  */
 
 const MODULE_ID = "cpr-melee-ablation";
 
-Hooks.once("ready", async () => {
-  let CPRChat;
-  try {
-    const mod = await import(`/systems/${game.system.id}/modules/chat/cpr-chat.js`);
-    CPRChat = mod.default ?? mod;
-  } catch (err) {
-    console.error(`[${MODULE_ID}] Could not import CPRChat:`, err);
-    return;
-  }
+Hooks.once("ready", () => {
+  // Patch renderTemplate — confirmed to fire with data.ablation on the damage card
+  const _origRenderTemplate = renderTemplate;
 
-  // Patch RenderDamageApplicationCard — called by the native attack button.
-  // args[0] is a plain data object with actor, damage, ablation, armorData etc.
-  // args[1] is likely the source roll or item reference.
-  if (typeof CPRChat.RenderDamageApplicationCard === "function") {
-    const _orig = CPRChat.RenderDamageApplicationCard.bind(CPRChat);
-    CPRChat.RenderDamageApplicationCard = async function (...args) {
-      const data = args[0];
-      console.log(`[${MODULE_ID}] RenderDamageApplicationCard — data keys:`, Object.keys(data ?? {}));
-      console.log(`[${MODULE_ID}] data.ablation before:`, data?.ablation);
-      console.log(`[${MODULE_ID}] all args count:`, args.length);
-
-      // Log every arg to find the item/actor reference
-      for (let i = 0; i < args.length; i++) {
-        if (args[i] && typeof args[i] === "object") {
-          console.log(`[${MODULE_ID}] args[${i}] constructor:`, args[i]?.constructor?.name);
-          console.log(`[${MODULE_ID}] args[${i}] keys:`, Object.keys(args[i]).slice(0, 15).join(", "));
-        }
-      }
-
-      // Try to find actor+item from data.actor or armorData
-      let ablation = null;
-
-      // Method 1: data.actor is an Actor instance — find the weapon from the
-      // most recently rolled item via __autoFumbleRecovery on the actor
+  window.renderTemplate = async function(path, data) {
+    // Only intercept the damage application card
+    if (path && path.includes("cpr-damage-application-card")) {
       try {
+        // data.actor is the live Actor object — find flagged weapons
         const actor = data?.actor;
         if (actor?.items) {
-          // Check all weapons for a meleeAblation flag
-          // Use the one with the highest priority (most recently used)
-          // CPR sets actor._lastDamageItem or similar — check
-          console.log(`[${MODULE_ID}] actor keys:`, Object.keys(actor).slice(0, 20).join(", "));
-          const flaggedWeapons = Array.from(actor.items ?? []).filter(i =>
-            i.type === "weapon" && i.getFlag("world", "meleeAblation")
-          );
-          console.log(`[${MODULE_ID}] flagged weapons:`, flaggedWeapons.map(w => w.name + "=" + w.getFlag("world", "meleeAblation")));
+          // The last-used weapon is tracked by CPR on the actor
+          // Try to find which weapon was just used via currentWeapon or flagged weapons
+          let ablation = null;
+
+          // Check currentWeapon reference first
+          const currentWeaponId = actor.system?.externalData?.currentWeapon?.id;
+          if (currentWeaponId) {
+            const weapon = actor.items.get(currentWeaponId);
+            const val = weapon?.getFlag("world", "meleeAblation");
+            if (val) {
+              ablation = val;
+              console.log(`[${MODULE_ID}] currentWeapon "${weapon.name}" flag =`, val);
+            }
+          }
+
+          // If no currentWeapon match, check all flagged weapons
+          // and use the one that matches the damage type/weapon type in data
+          if (ablation === null) {
+            const flaggedWeapons = Array.from(actor.items).filter(i =>
+              i.type === "weapon" && i.getFlag("world", "meleeAblation")
+            );
+            if (flaggedWeapons.length === 1) {
+              // Only one flagged weapon — use it
+              ablation = flaggedWeapons[0].getFlag("world", "meleeAblation");
+              console.log(`[${MODULE_ID}] Single flagged weapon "${flaggedWeapons[0].name}" ablation =`, ablation);
+            } else if (flaggedWeapons.length > 1) {
+              // Multiple flagged weapons — match by weaponType in armorData or location
+              console.log(`[${MODULE_ID}] Multiple flagged weapons — need smarter matching`);
+            }
+          }
+
+          if (ablation !== null && Number.isInteger(ablation) && ablation >= 2) {
+            console.log(`[${MODULE_ID}] Injecting ablation =`, ablation, "into damage card");
+            data.ablation = ablation;
+            data.shieldAblation = data.shieldAblation ?? 0;
+          }
         }
       } catch (e) {
-        console.warn(`[${MODULE_ID}] Method 1 error:`, e);
-      }
-
-      return _orig(...args);
-    };
-    console.log(`[${MODULE_ID}] RenderDamageApplicationCard patched.`);
-  }
-
-  // Also patch RenderRollCard for macro-based rolls
-  if (typeof CPRChat.RenderRollCard === "function") {
-    const _orig = CPRChat.RenderRollCard.bind(CPRChat);
-    CPRChat.RenderRollCard = async function (cprRoll) {
-      const ablation = _getAblationFromRoll(cprRoll);
-      if (ablation !== null) {
-        cprRoll.ablation      = ablation;
-        cprRoll.ablationValue = ablation;
-      }
-      return _orig(cprRoll);
-    };
-    console.log(`[${MODULE_ID}] RenderRollCard patched.`);
-  }
-
-  console.log(`[${MODULE_ID}] Hooks installed.`);
-});
-
-function _getAblationFromRoll(cprRoll) {
-  if (!cprRoll) return null;
-  try {
-    const actorId = cprRoll.entityData?.actor;
-    const itemId  = cprRoll.entityData?.item;
-    if (actorId && itemId) {
-      const actor = game.actors?.get(actorId)
-        ?? canvas.tokens?.placeables.find(t =>
-            (t.actor?.id ?? t.actor?._id) === actorId)?.actor;
-      if (actor) {
-        const item = actor.items?.get(itemId)
-          ?? Array.from(actor.items ?? []).find(i => (i.id ?? i._id) === itemId);
-        if (item) {
-          const val = item.getFlag("world", "meleeAblation");
-          if (val !== undefined && val !== null) return val;
-        }
+        console.warn(`[${MODULE_ID}] renderTemplate hook error:`, e);
       }
     }
-  } catch (e) {
-    console.warn(`[${MODULE_ID}] _getAblationFromRoll error:`, e);
-  }
-  try {
-    const val = cprRoll?.__autoFumbleRecoveryItem?.flags?.world?.meleeAblation ?? null;
-    if (val !== null) return val;
-  } catch (_) {}
-  return null;
-}
+
+    return _origRenderTemplate(path, data);
+  };
+
+  console.log(`[${MODULE_ID}] renderTemplate hook installed.`);
+});
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
